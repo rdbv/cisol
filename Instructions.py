@@ -1,134 +1,126 @@
 from capstone import *
 from capstone.x86 import *
+from Operand import *
 
-dataTypes = {
-    1 : 'uint8_t',
-    2 : 'uint16_t',
-    4 : 'uint32_t',
-    8 : 'uint64_t'
+# Overflow flag mask
+ofMask = {
+    1 : 0x80,
+    2 : 0x8000,
+    4 : 0x80000000,
+    8 : 0x8000000000000000
 }
 
-''' Instructions C impl. '''
+''' 
+    Instructions in C implementation
+'''
 
-def mov(l, r, inst):
-    if l[0] == X86_OP_MEM:
-        # mem, <reg/imm>
-        return 'MEMORY_SET(%s, %s, %s)' % (dataTypes[inst.operands[0].size], l[1], r[1])
+def mov(left, right, inst, cg):
+    cg.emit('%s = %s' % (left.getValue(), right.getValue()) ,
+            comment = (inst.mnemonic + ' ' + inst.op_str))
 
-    if l[0] == X86_OP_REG:
-        # reg, <reg/mem/imm>
-        if r[0] == X86_OP_IMM or r[0] == X86_OP_REG:
-            return '%s = %s' % (l[1], r[1])
-        # reg, mem
-        if r[0] == X86_OP_MEM:
-            return '%s = MEMORY_GET(%s, %s)' % (l[1], dataTypes[inst.operands[0].size], r[1])
+def movzx(left, right, inst, cg):
+    cg.emit('%s = 0, %s = %s' % (left.getValue(8), left.getValue(), right.getValue()),
+            comment = (inst.mnemonic + ' ' + inst.op_str))
 
-    return '_not_compile_'
-
-def sub(l, r, inst):
-    size = dataTypes[inst.operands[0].size]
-    sizeB = inst.operands[0].size * 8
-
-    # mem, <reg, imm>
-    if l[0] == X86_OP_MEM:
-        return 'TMP%s(MEMORY_GET(%s, %s), -, %s)' % (sizeB, size, l[1], r[1]) \
-            +  '     zf =  !tmp%s;\n' % (sizeB) \
-            +  '     cf =  MEMORY_GET(%s, %s) < %s;\n' % (size, l[1], r[1]) \
-            +  '     MEMORY_GET(%s, %s) = tmp%d;' % (size, l[1], sizeB)
-
-    # reg, <reg/imm/mem>
-    if l[0] == X86_OP_REG:
-        # reg, <imm/reg>
-        if r[0] == X86_OP_IMM or r[0] == X86_OP_REG:
-            return 'TMP%s(%s, -, %s);\n' % (sizeB, l[1], r[1]) \
-                 + '     zf = !tmp%s;\n' % (sizeB) \
-                 + '     cf = %s < %s;\n' % (l[1], r[1])\
-                 + '     %s = %s;' % (l[1],'tmp%d' % (sizeB) ) 
-        # reg, mem
-        if r[0] == X86_OP_MEM:
-            return 'TMP%s(%s, -, MEMORY_GET(%s, %s));\n' % (sizeB, l[1], size, r[1]) \
-                +  '     zf = !tmp%s\n' % (sizeB) \
-                +  '     cf = %s < MEMORY_GET(%s, %s);\n' % (l[1], size, r[1]) \
-                +  '     %s = %s' % (l[1], 'tmp%d' % (sizeB) )
-
-    return '_not_compile_'
-
-def add(l, r, inst):
-    size = dataTypes[inst.operands[0].size]
-    sizeB = inst.operands[0].size * 8
-
-    # mem, <reg, imm>
-    if l[0] == X86_OP_MEM:
-        return 'TMP%s(MEMORY_GET(%s, %s), +, %s)' % (sizeB, size, l[1], r[1]) \
-            +  '     zf =  !tmp%s;\n' % (sizeB) \
-            +  '     cf =  tmp%s < MEMORY_GET(%s, %s);\n' % (sizeB, size, l[1]) \
-            +  '     MEMORY_GET(%s, %s) = tmp%d;' % (size, l[1], sizeB)
-
-    # reg, <reg/imm/mem>
-    if l[0] == X86_OP_REG:
-        # reg, <imm/reg>
-        if r[0] == X86_OP_IMM or r[0] == X86_OP_REG:
-            return 'TMP%s(%s, +, %s);\n' % (sizeB, l[1], r[1]) \
-                 + '     zf = !tmp%s;\n' % (sizeB) \
-                 + '     cf = tmp%s < %s;\n' % (sizeB, l[1])\
-                 + '     %s = %s;' % (l[1],'tmp%d' % (sizeB) ) 
-        # reg, mem
-        if r[0] == X86_OP_MEM:
-            return 'TMP%s(%s, +, MEMORY_GET(%s, %s));\n' % (sizeB, l[1], size, r[1]) \
-                +  '     zf = !tmp%s;\n' % (sizeB) \
-                +  '     cf = tmp%s < %s;\n' % (sizeB, l[1]) \
-                +  '     %s = %s' % (l[1], 'tmp%d' % (sizeB) )
-
-    return '_not_compile_'
-
-def inc(l, inst):
-    size = dataTypes[inst.operands[0].size]
-    sizeB = inst.operands[0].size * 8
-
-    if l[0] == X86_OP_MEM:
-        return 'TMP%s(MEMORY_GET(%s, %s), +, 1)' % (sizeB, size, l[1])
-
-    if l[0] == X86_OP_REG:
-        return '%s += 1' % (l[1])
+def sub(left, right, inst, cg, isCmp = False):
+    sizeBits, sizeBytes = (left.sizeBits, left.sizeBytes)
+    lVal, rVal = (left.getValue(), right.getValue())
     
-    return '_not_compile_'
+    if isCmp:
+        actions = []
+    else:
+        actions = ['%s = tmp%s' % (lVal, sizeBits)]
 
-def dec(l, inst):
-    size = dataTypes[inst.operands[0].size]
-    sizeB = inst.operands[0].size * 8
+    cg.emit('TMP%s(%s, -, %s)' % (sizeBits, lVal, rVal),
+            flags = [
+                ['c', 'SET_CF_SUB(%s, %s)' % (lVal, rVal)],
+                ['z', 'SET_ZF(%s)' % (sizeBits)],
+                ['a', 'SET_AF_0(%s, %s)' % (left.getValue(1), right.getValue(1))],
+                ['o', 'SET_OF_SUB(%s, %s, %s, %s)' % (lVal, rVal, sizeBits, hex(ofMask[sizeBytes]) )]
+            ],
+            actions = actions,
+            comment = (inst.mnemonic + ' ' + inst.op_str));
 
-    if l[0] == X86_OP_MEM:
-        return 'TMP%s(MEMORY_GET(%s, %s), -, 1)' % (sizeB, size, l[1])
 
-    if l[0] == X86_OP_REG:
-        return '%s -= 1' % (l[1])
+def add(left, right, inst, cg):
+    sizeBits, sizeBytes = (left.sizeBits, left.sizeBytes)
+    lVal, rVal = (left.getValue(), right.getValue())
+
+    cg.emit('TMP%s(%s, +, %s)' % (sizeBits, lVal, rVal),
+            flags = [
+                ['c', 'SET_CF_ADD(%s, %s)' % (sizeBits, lVal)],
+                ['z', 'SET_ZF(%s)' % (sizeBits)],
+                ['a', 'SET_AF_0(%s, %s)' % (left.getValue(1), right.getValue(1))],
+                ['o', 'SET_OF_ADD(%s, %s, %s, %s)' % (lVal, rVal, sizeBits, hex(ofMask[sizeBytes]) )]
+            ],
+            actions = [
+                '%s = tmp%s' % (lVal, sizeBits)
+            ],
+            comment = (inst.mnemonic + ' ' + inst.op_str))
+
+
+def inc(left, inst, cg):
+    sizeBits, sizeBytes = (left.sizeBits, left.sizeBytes)
+    lVal, rVal = left.getValue(), '1'
     
-    return '_not_compile_'
+    cg.emit('TMP%s(%s, +, %s)' % (sizeBits, lVal, rVal),
+            flags = [
+                ['z', 'SET_ZF(%s)' % (sizeBits)],
+                ['a', 'SET_AF_INC(%s)' % (sizeBits)],
+                ['o', 'SET_OF_INC_DEC_NEG(%s, %s)' % (sizeBits, hex(ofMask[sizeBytes]) )],
+            ],
+            actions = [
+                '%s = tmp%s' % (lVal, sizeBits)
+            ],
+            comment = (inst.mnemonic + ' ' + inst.op_str))
 
-def cmp(l, r, inst):
-    size = dataTypes[inst.operands[0].size]
-    sizeB = inst.operands[0].size * 8
 
-    # mem, <reg, imm>
-    if l[0] == X86_OP_MEM:
-        return 'TMP%s(MEMORY_GET(%s, %s), -, %s)' % (sizeB, size, l[1], r[1]) \
-            +  '     zf =  !tmp%s;\n' % (sizeB) \
-            +  '     cf =  MEMORY_GET(%s, %s) < %s;' % (size, l[1], r[1]) 
+def dec(left, inst, cg):
+    sizeBits, sizeBytes = (left.sizeBits, left.sizeBytes)
+    lVal, rVal = left.getValue(), '1'
+    
+    cg.emit('TMP%s(%s, -, %s)' % (sizeBits, lVal, rVal),
+            flags = [
+                ['z', 'SET_ZF(%s)' % (sizeBits)],
+                ['a', 'SET_AF_DEC(%s)' % (sizeBits)],
+                ['o', 'SET_OF_INC_DEC_NEG(%s, %s)' % (sizeBits, hex(ofMask[sizeBytes]-1) )],
+            ],
+            actions = [
+                '%s = tmp%s' % (lVal, sizeBits)
+            ],
+            comment = (inst.mnemonic + ' ' + inst.op_str))
 
-    # reg, <reg/imm/mem>
-    if l[0] == X86_OP_REG:
-        # reg, <imm/reg>
-        if r[0] == X86_OP_IMM or r[0] == X86_OP_REG:
-            return 'TMP%s(%s, -, %s);\n' % (sizeB, l[1], r[1]) \
-                 + '     zf = !tmp%s;\n' % (sizeB) \
-                 + '     cf = %s < %s;' % (l[1], r[1])
-        # reg, mem
-        if r[0] == X86_OP_MEM:
-            return 'TMP%s(%s, -, MEMORY_GET(%s, %s));\n' % (sizeB, l[1], size, r[1]) \
-                +  '     zf = !tmp%s\n' % (sizeB) \
-                +  '     cf = %s < MEMORY_GET(%s, %s);' % (l[1], size, r[1]) 
 
-    return '_not_compile_'
+def cdqe(inst, cg):
+    cg.emit('// cdqe not implemented yet')
 
-def jne(l, inst):
-    return 'if(!zf) goto _%x;' % (int(l[1]))
+def xor(left, right, inst, cg):
+    pass
+
+def cmp(left, right, inst, cg):
+    # cmp is sub without setting value
+    sub(left, right, inst, cg, True)
+
+def jmp(op, inst, cg):
+    cg.emit('goto _%x' % (int(op.value)),
+            comment = (inst.mnemonic + ' ' + inst.op_str));
+
+def jne(op, inst, cg):
+    cg.emit('if(!zf)\n        goto _%x' % (int(op.value)),
+            comment = (inst.mnemonic + ' ' + inst.op_str));
+
+def je(op, inst, cg):
+    cg.emit('if(zf)\n         goto _%x' % (int(op.value)),
+            comment = (inst.mnemonic + ' ' + inst.op_str));
+
+def jb(op, inst, cg):
+    cg.emit('if(cf)\n         goto _%x;' % (int(op.value)),
+            comment = (inst.mnemonic + ' ' + inst.op_str));
+
+def jbe(op, inst, cg):
+    cg.emit('if(cf == 1 || zf == 1)\n      goto _%x' % (int(op.value)),
+            comment = (inst.mnemonic + ' ' + inst.op_str));
+
+def jnb(op, inst, cg):
+    cg.emit('if(!cf)\n        goto _%x;' % (int(op.value)),
+            comment = (inst.mnemonic + ' ' + inst.op_str));

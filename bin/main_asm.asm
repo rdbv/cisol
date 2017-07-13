@@ -2,7 +2,5 @@
 global _start
 
 _start:
-    mov al, 10
-    mov eax, dword [rbp-4]
-    mov rbx, qword [rbp-32]
-
+    mov rax, 0x10
+    mov ebx, 0x20
